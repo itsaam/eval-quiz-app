@@ -100,6 +100,14 @@ function showRegistration(subject) {
       <p class="form-message" id="registration-message" role="alert"></p>
     </form>
   </main>`;
+  app.querySelectorAll('a[href="/#quiz"]').forEach((link) => {
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      showHome();
+      if (location.hash !== "#quiz") location.hash = "quiz";
+      document.querySelector("#quiz").scrollIntoView();
+    });
+  });
   focusHeading();
   const form = app.querySelector("form");
   form.addEventListener("submit", async (event) => {

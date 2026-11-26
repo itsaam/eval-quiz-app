@@ -8,7 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 3007;
 
 // Trust proxy (Nginx) pour que express-rate-limit identifie correctement les IPs
-app.set("trust proxy", 2);
+app.set("trust proxy", 1);
 
 app.use(cors());
 app.use(express.json());
@@ -60,7 +60,7 @@ const pool = new pg.Pool({
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
 const JWT_SECRET = process.env.JWT_SECRET || "change-this-secret";
-const { CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_EMAIL_API_TOKEN, FROM_EMAIL } = process.env;
+const { CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_EMAIL_API_TOKEN, FROM_EMAIL, RESULT_EMAIL_RECIPIENT } = process.env;
 
 if (process.env.NODE_ENV === "production" && (!process.env.ADMIN_PASSWORD || !process.env.JWT_SECRET)) {
   throw new Error("Set ADMIN_PASSWORD and JWT_SECRET before starting the production server.");
@@ -397,7 +397,8 @@ app.post("/api/results", resultsLimiter, async (req, res) => {
 });
 
 async function sendResultEmail(user, score, totalQuestions) {
-  if (!CLOUDFLARE_ACCOUNT_ID || !CLOUDFLARE_EMAIL_API_TOKEN || !FROM_EMAIL) {
+  if (!CLOUDFLARE_ACCOUNT_ID || !CLOUDFLARE_EMAIL_API_TOKEN || !FROM_EMAIL ||
+      (RESULT_EMAIL_RECIPIENT && user.email.toLowerCase() !== RESULT_EMAIL_RECIPIENT.toLowerCase())) {
     return false;
   }
 
