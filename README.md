@@ -1,51 +1,16 @@
-# Quiz App - Projet d'évaluation Conteneurisation
+# Stacklab
 
-## Mission
+Stacklab propose six quiz en français sur Docker, Ansible, le DevOps, la CI/CD, la gestion du code et l’usine logicielle. Le score et les corrections s’affichent à la fin de chaque quiz.
 
-Vous intégrez une équipe DevOps chargée de **conteneuriser, sécuriser et déployer** l'application **Quiz App** sur Microsoft Azure, puis d'automatiser ses livraisons.
+- [Stacklab](https://stacklab.vjuya.me/)
+- [Maquette Figma](https://www.figma.com/design/VUrXRbpLaHMBzrc86ENHqt?node-id=4-166)
 
-Le **code applicatif est fourni**. Votre mission concerne la conteneurisation, l'exploitation, la sécurité et le déploiement ; **ne modifiez pas la logique métier**. Une modification ciblée d'une question de quiz présente dans le code servira à démontrer le processus de livraison.
+## Démarrer en local
 
-L'application comporte un frontend, un backend et une base PostgreSQL. Elle peut utiliser un service d'envoi d'emails ; les fonctionnalités qui en dépendent doivent être configurées uniquement si les accès nécessaires sont fournis.
+Copiez `.env.example` vers `.env`, renseignez les valeurs locales, puis lancez `docker compose up -d --build --wait`. Ouvrez [le quiz](http://localhost:8087/) ou [l’administration](http://localhost:8087/gestion-quiz).
 
-## Résultat attendu
+Compose relie Nginx, Express et PostgreSQL. Pour activer les e-mails, configurez `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_EMAIL_API_TOKEN` et `FROM_EMAIL`. Le score s’enregistre aussi quand l’envoi est désactivé. La configuration de production est gérée dans le namespace Stacklab, séparément des sources.
 
-1. Faire fonctionner Quiz App localement avec Docker, Docker Compose et PostgreSQL persistant.
-2. Construire des images sécurisées, analyser les vulnérabilités et documenter les corrections.
-3. Déployer les images via Azure Container Registry (ACR) sur Azure Container Apps avec Azure CLI.
-4. Connecter le backend à un PostgreSQL externe (Neon recommandé, ou solution compatible).
-5. Mettre en place une CI/CD avec **GitHub Actions (recommandé)** ou **GitLab CI/CD (autorisé)** : contrôles sur Pull/Merge Request, scan Trivy bloquant, puis publication et déploiement après fusion dans `main`.
-6. Présenter le travail et les preuves de chaque jalon lors d'une soutenance.
+GitHub Actions construit et scanne les images web et API, puis publie les images de `main` dans GHCR avec le SHA du commit. Argo CD applique les manifests du dépôt GitOps de Sunny.
 
-Les jalons sont validés progressivement. Une difficulté sur PostgreSQL cloud n'annule pas les jalons déjà acquis et n'interdit pas de démontrer la partie CI/CD technique.
-
-## Travail à partir du dépôt officiel
-
-Le formateur publie le code de départ et les consignes sur la branche `main` de son dépôt **de référence**. **Chaque groupe crée un fork de ce dépôt sur GitHub**, puis travaille exclusivement dans son fork. Les branches `feature/*` et les Pull Requests doivent cibler **`main` du fork du groupe**, jamais `main` du formateur.
-
-- Sur GitHub : faites un fork **par groupe**, activez GitHub Actions si nécessaire et configurez vos propres secrets et autorisations Azure. Les secrets du dépôt d’origine ne sont pas transmis au fork.
-- Sur GitLab (alternative admise) : créez un projet de groupe à partir du code de départ et utilisez des **Merge Requests dirigées vers `main` de votre projet**, pas vers le dépôt officiel.
-- Aucun accès en écriture au dépôt du formateur n’est nécessaire. Transmettez au formateur l’URL de votre dépôt de groupe.
-
-## Commencer
-
-Lisez les documents dans cet ordre :
-
-- [Présentation du projet](docs/01-presentation-projet.md)
-- [Consignes techniques](docs/02-consignes-techniques.md)
-- [Jalons et validations](docs/03-jalons-validation.md)
-- [Exigences CI/CD](docs/04-pipeline-cicd.md)
-- [Fonctionnalités avancées](docs/05-bonus-azure.md)
-- [Soutenance et livrables](docs/06-soutenance-livrables.md)
-- [Ressources officielles](docs/07-ressources.md)
-- [Documentation technique de Quiz App : ports, API et configuration](docs/08-documentation-technique.md)
-- [Utilisation responsable de l’IA](docs/09-utilisation-ia.md)
-
-**Important :** les comptes Azure for Students peuvent être limités par les crédits, quotas, régions et autorisations. Vérifiez les possibilités de votre abonnement avant de créer des ressources payantes. Supprimez les ressources inutilisées après sauvegarde des preuves et accord du formateur.
-
-## Règles générales
-
-- Travail en groupe ; déposez le lien de votre dépôt et les preuves demandées au formateur.
-- Versionnez les fichiers de configuration, les scripts et les workflows **que vous produisez**.
-- Ne commitez jamais de mots de passe, URL PostgreSQL contenant des identifiants, clés API, secrets GitHub/GitLab ou fichiers `.env` réels.
-- Une démonstration validée reste acquise même si les ressources cloud sont supprimées ensuite.
+Stacklab reprend le projet [Quiz App](https://github.com/franklin-tutorials/eval-quiz-app). Les polices auto-hébergées sont distribuées sous licence SIL Open Font License, avec leurs notices dans `public/stacklab/`.

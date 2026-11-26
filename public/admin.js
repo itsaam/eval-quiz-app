@@ -221,20 +221,16 @@ async function loadResults() {
     totalResultsEl.textContent = data.pagination.total;
 
     // Update table
-    resultsBody.innerHTML = data.results
-      .map(
-        (r) => `
-        <tr>
-          <td>${r.firstname}</td>
-          <td>${r.email}</td>
-          <td>${r.attempts}</td>
-          <td>${r.best_score}/${r.total_questions} (${Math.round((r.best_score / r.total_questions) * 100)}%)</td>
-          <td>${r.avg_score}/${r.total_questions}</td>
-          <td>${new Date(r.last_attempt).toLocaleString("fr-FR")}</td>
-        </tr>
-      `
-      )
-      .join("");
+    resultsBody.replaceChildren(...data.results.map((result) => {
+      const row = document.createElement("tr");
+      const percent = Math.round((result.best_score / result.total_questions) * 100);
+      for (const value of [result.firstname, result.email, result.attempts,
+        `${result.best_score}/${result.total_questions} (${percent}%)`,
+        `${result.avg_score}/${result.total_questions}`, new Date(result.last_attempt).toLocaleString("fr-FR")]) {
+        row.insertCell().textContent = value;
+      }
+      return row;
+    }));
 
     // Update pagination
     pageInfo.textContent = `Page ${currentPage} / ${totalPages || 1}`;
