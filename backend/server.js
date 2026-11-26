@@ -72,13 +72,6 @@ function csvText(value) {
   return '"' + safe.replaceAll('"', '""') + '"';
 }
 
-function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>"']/g, (character) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  })[character]);
-}
-
-// Auth middleware for admin routes
 function authenticateAdmin(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -130,9 +123,9 @@ app.get("/api/admin/results", authenticateAdmin, async (req, res) => {
         u.email,
         MAX(u.firstname) as firstname,
         COUNT(*) as attempts,
-        MAX(qr.score) as best_score,
-        MAX(qr.total_questions) as total_questions,
-        ROUND(AVG(qr.score)::numeric, 1) as avg_score,
+        (ARRAY_AGG(qr.score ORDER BY qr.score::numeric / NULLIF(qr.total_questions, 0) DESC NULLS LAST, qr.completed_at DESC, qr.id DESC))[1] as best_score,
+        (ARRAY_AGG(qr.total_questions ORDER BY qr.score::numeric / NULLIF(qr.total_questions, 0) DESC NULLS LAST, qr.completed_at DESC, qr.id DESC))[1] as total_questions,
+        ROUND(AVG(qr.score::numeric / NULLIF(qr.total_questions, 0)) * 100, 1) as avg_percentage,
         MAX(qr.completed_at) as last_attempt
       FROM quiz_results qr
       JOIN users u ON qr.user_id = u.id
@@ -165,10 +158,10 @@ app.get("/api/admin/results/export", authenticateAdmin, async (req, res) => {
         u.email,
         MAX(u.firstname) as firstname,
         COUNT(*) as attempts,
-        MAX(qr.score) as best_score,
-        MAX(qr.total_questions) as total_questions,
-        ROUND(AVG(qr.score)::numeric, 1) as avg_score,
-        ROUND((MAX(qr.score)::numeric / MAX(qr.total_questions)) * 100, 1) as best_percentage,
+        (ARRAY_AGG(qr.score ORDER BY qr.score::numeric / NULLIF(qr.total_questions, 0) DESC NULLS LAST, qr.completed_at DESC, qr.id DESC))[1] as best_score,
+        (ARRAY_AGG(qr.total_questions ORDER BY qr.score::numeric / NULLIF(qr.total_questions, 0) DESC NULLS LAST, qr.completed_at DESC, qr.id DESC))[1] as total_questions,
+        ROUND(AVG(qr.score::numeric / NULLIF(qr.total_questions, 0)) * 100, 1) as avg_percentage,
+        ROUND(MAX(qr.score::numeric / NULLIF(qr.total_questions, 0)) * 100, 1) as best_percentage,
         MAX(qr.completed_at) as last_attempt
       FROM quiz_results qr
       JOIN users u ON qr.user_id = u.id
@@ -177,10 +170,10 @@ app.get("/api/admin/results/export", authenticateAdmin, async (req, res) => {
     );
 
     const csv = [
-      "Prénom,Email,Tentatives,Meilleur Score,Total Questions,Score Moyen,Meilleur %,Dernière Tentative",
+      "Prénom,Email,Tentatives,Meilleur Score,Total Questions,Moyenne %,Meilleur %,Dernière Tentative",
       ...results.rows.map(
         (r) =>
-          `${csvText(r.firstname)},${csvText(r.email)},${r.attempts},${r.best_score},${r.total_questions},${r.avg_score},${r.best_percentage}%,${csvText(r.last_attempt)}`
+          `${csvText(r.firstname)},${csvText(r.email)},${r.attempts},${r.best_score},${r.total_questions},${r.avg_percentage}%,${r.best_percentage}%,${csvText(r.last_attempt)}`
       ),
     ].join("\n");
 
@@ -304,7 +297,12 @@ app.post("/api/users", registrationLimiter, async (req, res) => {
       [firstname.trim(), email]
     );
 
-    res.status(201).json(result.rows[0]);
+    const user = result.rows[0];
+    const submissionToken = jwt.sign({ quizUserId: user.id }, JWT_SECRET, {
+      audience: "stacklab-quiz",
+      expiresIn: "2h",
+    });
+    res.status(201).json({ ...user, submissionToken });
   } catch (error) {
     console.error("Error creating user:", error);
     res.status(500).json({ error: "Internal server error" });
@@ -313,7 +311,7 @@ app.post("/api/users", registrationLimiter, async (req, res) => {
 
 // Save quiz results and send email (with rate limiting)
 app.post("/api/results", resultsLimiter, async (req, res) => {
-  const { userId, score, totalQuestions, answers } = req.body;
+  const { userId, score, totalQuestions, answers, submissionToken } = req.body;
   if (!Number.isInteger(userId) || userId < 1 ||
       !Number.isInteger(totalQuestions) || totalQuestions < 1 || totalQuestions > 50 ||
       !Number.isInteger(score) || score < 0 || score > totalQuestions ||
@@ -327,6 +325,15 @@ app.post("/api/results", resultsLimiter, async (req, res) => {
     return res.status(400).json({ error: "Invalid quiz result" });
   }
 
+  try {
+    const claim = jwt.verify(submissionToken, JWT_SECRET, { audience: "stacklab-quiz" });
+    if (claim.quizUserId !== userId) {
+      return res.status(403).json({ error: "Invalid submission token" });
+    }
+  } catch {
+    return res.status(403).json({ error: "Invalid submission token" });
+  }
+
   let client;
   let quizResultId;
   let user;
@@ -334,6 +341,18 @@ app.post("/api/results", resultsLimiter, async (req, res) => {
   try {
     client = await pool.connect();
     await client.query("BEGIN");
+
+    const registered = await client.query("SELECT email FROM users WHERE id = $1 FOR UPDATE", [userId]);
+    user = registered.rows[0];
+    if (!user) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ error: "Unknown registration" });
+    }
+    const previous = await client.query("SELECT 1 FROM quiz_results WHERE user_id = $1", [userId]);
+    if (previous.rowCount) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ error: "Result already saved" });
+    }
 
     // Insert quiz result
     const resultQuery = await client.query(
@@ -351,7 +370,7 @@ app.post("/api/results", resultsLimiter, async (req, res) => {
           quizResultId,
           answer.questionIndex,
           answer.questionText,
-          answer.userAnswer,
+          answer.userAnswer ?? "",
           answer.correctAnswer,
           answer.isCorrect,
           answer.timeSpentMs,
@@ -359,11 +378,6 @@ app.post("/api/results", resultsLimiter, async (req, res) => {
       );
     }
 
-    const userQuery = await client.query(
-      "SELECT firstname, email FROM users WHERE id = $1",
-      [userId]
-    );
-    user = userQuery.rows[0];
     await client.query("COMMIT");
   } catch (error) {
     await client?.query("ROLLBACK").catch(() => {});
@@ -375,73 +389,19 @@ app.post("/api/results", resultsLimiter, async (req, res) => {
 
   let emailAccepted = false;
   try {
-    emailAccepted = await sendResultEmail(user, score, totalQuestions, answers);
+    emailAccepted = await sendResultEmail(user, score, totalQuestions);
   } catch (error) {
     console.error("Cloudflare email request failed", error.name);
   }
   res.status(201).json({ message: "Results saved", quizResultId, emailAccepted });
 });
 
-async function sendResultEmail(user, score, totalQuestions, answers) {
+async function sendResultEmail(user, score, totalQuestions) {
   if (!CLOUDFLARE_ACCOUNT_ID || !CLOUDFLARE_EMAIL_API_TOKEN || !FROM_EMAIL) {
     return false;
   }
 
   const percentage = Math.round((score / totalQuestions) * 100);
-
-  const answersHtml = answers
-    .map(
-      (a, i) => `
-      <tr style="background-color: ${a.isCorrect ? "#d4edda" : "#f8d7da"}">
-        <td style="padding: 8px; border: 1px solid #ddd;">${i + 1}</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${escapeHtml(a.questionText)}</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${escapeHtml(a.userAnswer)}</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${
-          escapeHtml(a.correctAnswer)
-        }</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${
-          a.isCorrect ? "Correct" : "Incorrect"
-        }</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${(
-          a.timeSpentMs / 1000
-        ).toFixed(1)}s</td>
-      </tr>
-    `
-    )
-    .join("");
-
-  const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto;">
-      <h1 style="color: #5938d0;">Résultats Stacklab</h1>
-      <p>Bonjour ${escapeHtml(user.firstname)},</p>
-      <p>Voici vos résultats au quiz :</p>
-
-      <div style="background-color: #e5f2fc; padding: 20px; border-radius: 8px; margin: 20px 0;">
-        <h2 style="margin: 0; color: #1d63ed;">Score : ${score}/${totalQuestions} (${percentage}%)</h2>
-      </div>
-
-      <h3>Détail des réponses :</h3>
-      <table style="width: 100%; border-collapse: collapse;">
-        <thead>
-          <tr style="background-color: #1d63ed; color: white;">
-            <th style="padding: 8px; border: 1px solid #ddd;">#</th>
-            <th style="padding: 8px; border: 1px solid #ddd;">Question</th>
-            <th style="padding: 8px; border: 1px solid #ddd;">Votre réponse</th>
-            <th style="padding: 8px; border: 1px solid #ddd;">Bonne réponse</th>
-            <th style="padding: 8px; border: 1px solid #ddd;">Résultat</th>
-            <th style="padding: 8px; border: 1px solid #ddd;">Temps</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${answersHtml}
-        </tbody>
-      </table>
-
-      <p style="margin-top: 20px; color: #666;">
-        Merci d'avoir participé au quiz !
-      </p>
-    </div>
-  `;
 
   const account = encodeURIComponent(CLOUDFLARE_ACCOUNT_ID);
   const response = await fetch(
@@ -457,7 +417,6 @@ async function sendResultEmail(user, score, totalQuestions, answers) {
         to: user.email,
         subject: `Résultats Stacklab - ${score}/${totalQuestions}`,
         text: `Ton score est de ${score}/${totalQuestions} (${percentage} %).`,
-        html,
       }),
       signal: AbortSignal.timeout(8000),
     }

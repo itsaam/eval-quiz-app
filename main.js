@@ -252,7 +252,7 @@ async function showResult(run) {
   try {
     const response = await fetch("/api/results", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: run.user.id, score: run.score, totalQuestions: total, answers: run.answers }),
+      body: JSON.stringify({ userId: run.user.id, submissionToken: run.user.submissionToken, score: run.score, totalQuestions: total, answers: run.answers }),
     });
     if (!response.ok) throw new Error("Create result failed");
     const { emailAccepted } = await response.json();

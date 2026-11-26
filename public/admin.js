@@ -226,7 +226,7 @@ async function loadResults() {
       const percent = Math.round((result.best_score / result.total_questions) * 100);
       for (const value of [result.firstname, result.email, result.attempts,
         `${result.best_score}/${result.total_questions} (${percent}%)`,
-        `${result.avg_score}/${result.total_questions}`, new Date(result.last_attempt).toLocaleString("fr-FR")]) {
+        `${result.avg_percentage}%`, new Date(result.last_attempt).toLocaleString("fr-FR")]) {
         row.insertCell().textContent = value;
       }
       return row;
