@@ -1,399 +1,282 @@
 import "./style.css";
 
-const API_URL = "/api";
-const TIMEOUT = 4000;
-const QUESTION_TIME = 30;
-
-const app = document.querySelector("#app");
-
-let currentUser = null;
-let Questions = [];
-
-// Précharger tous les modules de questions avec Vite
-const questionModules = import.meta.glob("./questions_*.js");
-
-// Sujets disponibles (nom affiché -> chemin du module)
-const AVAILABLE_SUBJECTS = {
-  docker: "./questions_docker.js",
-  ansible: "./questions_ansible.js",
-  devops: "./questions_devops.js",
-  cicd: "./questions_cicd.js",
-  scm: "./questions_scm.js",
-  "usine-logicielle": "./questions_usine-logicielle.js",
+const IDENTITIES = {
+  docker: ["Docker", 20, "Images, conteneurs, volumes et réseau."],
+  ansible: ["Ansible", 50, "Automatisation, inventaires et playbooks."],
+  devops: ["Fondamentaux DevOps", 10, "Culture, pratiques et travail en équipe."],
+  cicd: ["CI/CD", 10, "Intégration continue et livraison automatisée."],
+  scm: ["Gestion du code source", 10, "Git et gestion des changements."],
+  "usine-logicielle": ["Usine logicielle", 10, "Outillage et chaîne de production logicielle."],
 };
 
-// Mélange aléatoire d'un tableau (Fisher-Yates)
-function shuffleArray(array) {
-  for (let i = array.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [array[i], array[j]] = [array[j], array[i]];
-  }
-  return array;
+const questionModules = import.meta.glob("./questions_*.js");
+const app = document.querySelector("#app");
+const secondsPerQuestion = 30;
+let currentRun;
+let tick;
+
+function escape(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[character]);
 }
 
-// Show registration form on load
-displayRegistrationForm();
+function answerLabel(value) {
+  return value.replace(/^[A-Z]\.\s+/, "");
+}
 
-function displayRegistrationForm() {
-  app.innerHTML = `
-    <h1>Quiz App</h1>
-    <p>Testez vos connaissances !</p>
-    <form id="registration-form" class="registration-form">
-      <div class="form-group">
-        <label for="firstname">Prénom</label>
-        <input type="text" id="firstname" name="firstname" required placeholder="Votre prénom">
+function navigation(playing = false) {
+  return `<header class="site-header shell">
+    <a class="wordmark" href="/" aria-label="Stacklab, accueil">stacklab.</a>
+    ${playing ? '<button class="link-button" id="leave-quiz">Quitter le quiz</button>' : `
+      <nav class="main-nav" aria-label="Navigation principale"><a href="/">Accueil</a><a href="/#quiz">Les quiz</a></nav>
+      <a class="admin-link" href="/gestion-quiz">Administration</a>`}
+  </header>`;
+}
+
+function footer() {
+  return `<footer class="site-footer shell"><a class="wordmark" href="/">stacklab.</a>
+    <a href="/#quiz">Les quiz</a><a href="/gestion-quiz">Administration</a></footer>`;
+}
+
+function resetRun() {
+  clearInterval(tick);
+  currentRun = undefined;
+}
+
+function showHome() {
+  resetRun();
+  app.innerHTML = `${navigation()}<main class="shell" id="contenu">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <h1 id="hero-title">DevOps.<br>À toi de jouer.</h1>
+        <p>Six quiz pour réviser Docker, Ansible,<br class="desktop-break"> la CI/CD et les fondamentaux du DevOps.</p>
+        <a class="button" href="#quiz">Explorer les quiz</a>
       </div>
-      <div class="form-group">
-        <label for="email">Email</label>
-        <input type="email" id="email" name="email" required placeholder="votre@email.com">
-        <small class="form-hint">Vos résultats vous seront envoyés par email</small>
+      <div class="hero-art">
+        <img src="/stacklab/modules.png" width="641" height="484" alt="Modules électroniques translucides violets empilés">
+        <aside class="quiz-preview" aria-label="Aperçu d’une question">
+          <div class="split-line"><strong>Docker</strong><span>Question 3 / 20</span></div>
+          <p>Construire une image Docker ?</p>
+          <div class="preview-answer"><strong>docker build</strong><span>Bonne réponse</span></div>
+        </aside>
       </div>
-      <div class="form-group">
-        <label for="subject">Sujet du quiz</label>
-        <input type="text" id="subject" name="subject" required placeholder="Ex: docker">
+    </section>
+    <section class="catalog" id="quiz" aria-labelledby="catalog-title">
+      <h2 id="catalog-title">Choisis ton quiz</h2>
+      <div class="catalog-layout">
+        <article class="featured"><h3>Docker</h3><p class="accent">20 questions · 30 s par question</p>
+          <p>${IDENTITIES.docker[2]}</p><button class="button" data-topic="docker">Choisir Docker</button></article>
+        <ul class="theme-list">${Object.entries(IDENTITIES).filter(([key]) => key !== "docker")
+          .map(([key, [title, count]]) => `<li><button data-topic="${key}"><strong>${title}</strong><span>${count} questions</span></button></li>`).join("")}</ul>
       </div>
-      <!-- Honeypot field - hidden from real users -->
-      <div class="form-group hp-field" aria-hidden="true">
-        <label for="website">Website</label>
-        <input type="text" id="website" name="website" tabindex="-1" autocomplete="off">
-      </div>
-      <button type="submit">Commencer le quiz</button>
-    </form>
-  `;
-
-  const form = document.querySelector("#registration-form");
-  form.addEventListener("submit", handleRegistration);
-}
-
-async function handleRegistration(event) {
-  event.preventDefault();
-
-  const firstname = document.querySelector("#firstname").value;
-  const email = document.querySelector("#email").value;
-  const subject = document.querySelector("#subject").value;
-  const website = document.querySelector("#website").value; // Honeypot
-
-  const submitButton = document.querySelector("#registration-form button");
-  submitButton.disabled = true;
-  submitButton.textContent = "Chargement...";
-
-  // Vérifier que le sujet est valide
-  if (!AVAILABLE_SUBJECTS[subject]) {
-    alert("Veuillez choisir un sujet valide.");
-    submitButton.disabled = false;
-    submitButton.textContent = "Commencer le quiz";
-    return;
-  }
-
-  try {
-    // Charger dynamiquement les questions du sujet choisi
-    const modulePath = AVAILABLE_SUBJECTS[subject];
-    const questionsModule = await questionModules[modulePath]();
-    Questions = shuffleArray([...questionsModule.Questions]);
-
-    const response = await fetch(`${API_URL}/users`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ firstname, email, website }),
-    });
-
-    if (!response.ok) {
-      throw new Error("Erreur lors de l'inscription");
-    }
-
-    currentUser = await response.json();
-    startQuiz();
-  } catch (error) {
-    console.error("Registration error:", error);
-    submitButton.disabled = false;
-    submitButton.textContent = "Commencer le quiz";
-    alert("Erreur lors de l'inscription. Veuillez réessayer.");
-  }
-}
-
-function startQuiz() {
-  let currentQuestion = 0;
-  let score = 0;
-  let questionStartTime = null;
-  const answersData = [];
-
-  let currentQuestionTimer = null;
-
-  displayQuestion(currentQuestion);
-
-  function clean() {
-    if (currentQuestionTimer) {
-      clearInterval(currentQuestionTimer);
-      currentQuestionTimer = null;
-    }
-    while (app.firstElementChild) {
-      app.firstElementChild.remove();
-    }
-    const progress = getProgressBar(Questions.length, currentQuestion);
-    app.appendChild(progress);
-
-  }
-
-  function displayQuestion(index) {
-    clean();
-    const question = Questions[index];
-
-    if (!question) {
-      displayFinishMessage();
-      return;
-    }
-
-    questionStartTime = Date.now();
-
-    const answered = index;
-    const remaining = Questions.length - index;
-    const counter = document.createElement("p");
-    counter.className = "question-counter";
-    counter.innerHTML = `Question <strong>${index + 1}</strong> sur <strong>${Questions.length}</strong> &nbsp;·&nbsp; <span class="answered">${answered} répondue${answered > 1 ? "s" : ""}</span> &nbsp;·&nbsp; <span class="remaining">${remaining} restante${remaining > 1 ? "s" : ""}</span> &nbsp;·&nbsp; <span class="question-timer-inline" id="question-timer">${QUESTION_TIME}s</span>`;
-    app.appendChild(counter);
-
-    const title = getTitleElement(question.question);
-    app.appendChild(title);
-    const answersDiv = createAnswers(question.answers);
-    app.appendChild(answersDiv);
-
-    const submitButton = getSubmitButton();
-    submitButton.addEventListener("click", submit);
-    app.appendChild(submitButton);
-
-    let timeLeft = QUESTION_TIME;
-    currentQuestionTimer = setInterval(() => {
-      timeLeft--;
-      const timerEl = document.getElementById("question-timer");
-      if (timerEl) {
-        timerEl.textContent = `${timeLeft}s`;
-        if (timeLeft <= 10) timerEl.classList.add("timer-warning");
-      }
-      if (timeLeft <= 0) {
-        clearInterval(currentQuestionTimer);
-        currentQuestionTimer = null;
-        timeoutSubmit();
-      }
-    }, 1000);
-  }
-
-  async function displayFinishMessage() {
-    const h1 = document.createElement("h1");
-    h1.innerText = "Bravo ! Tu as terminé le quiz.";
-    const p = document.createElement("p");
-    p.innerText = `Tu as eu un score de ${score} sur ${Questions.length} !`;
-
-    app.appendChild(h1);
-    app.appendChild(p);
-
-    const savingP = document.createElement("p");
-    savingP.innerText = "Envoi des résultats en cours...";
-    savingP.className = "saving-message";
-    app.appendChild(savingP);
-
-    try {
-      await fetch(`${API_URL}/results`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId: currentUser.id,
-          score,
-          totalQuestions: Questions.length,
-          answers: answersData,
-        }),
-      });
-
-      savingP.innerText = `Résultats envoyés par email à ${currentUser.email} !`;
-      savingP.className = "saving-message success";
-    } catch (error) {
-      console.error("Error saving results:", error);
-      savingP.innerText = "Erreur lors de l'envoi des résultats.";
-      savingP.className = "saving-message error";
-    }
-  }
-
-  function timeoutSubmit() {
-    disableAllAnswers();
-
-    const timeSpentMs = Date.now() - questionStartTime;
-    const question = Questions[currentQuestion];
-
-    answersData.push({
-      questionIndex: currentQuestion,
-      questionText: question.question,
-      userAnswer: null,
-      correctAnswer: question.correct,
-      isCorrect: false,
-      timeSpentMs,
-    });
-
-    const correctAnswerId = formatId(question.correct);
-    const correctElement = document.querySelector(`label[for="${correctAnswerId}"]`);
-    if (correctElement) correctElement.classList.add("correct");
-
-    const timeoutMsg = document.createElement("p");
-    timeoutMsg.innerText = `Temps écoulé ! La bonne réponse était : ${question.correct}`;
-    const btn = app.querySelector("button");
-    if (btn) btn.remove();
-    app.appendChild(timeoutMsg);
-
-    setTimeout(() => {
-      currentQuestion++;
-      displayQuestion(currentQuestion);
-    }, 2000);
-  }
-
-  function submit() {
-    const selectedAnswer = app.querySelector('input[name="answer"]:checked');
-
-    if (!selectedAnswer) {
-      return;
-    }
-
-    if (currentQuestionTimer) {
-      clearInterval(currentQuestionTimer);
-      currentQuestionTimer = null;
-    }
-
-    disableAllAnswers();
-
-    const timeSpentMs = Date.now() - questionStartTime;
-    const value = selectedAnswer.value;
-    const question = Questions[currentQuestion];
-    const isCorrect = question.correct === value;
-
-    if (isCorrect) {
-      score++;
-    }
-
-    answersData.push({
-      questionIndex: currentQuestion,
-      questionText: question.question,
-      userAnswer: value,
-      correctAnswer: question.correct,
-      isCorrect,
-      timeSpentMs,
-    });
-
-    showFeedback(isCorrect, question.correct, value);
-    displayNextQuestionButton(() => {
-      currentQuestion++;
-      displayQuestion(currentQuestion);
-    });
-
-    const feedback = getFeedbackMessage(isCorrect, question.correct);
-    app.appendChild(feedback);
-  }
-
-  function createAnswers(answers) {
-    const answersDiv = document.createElement("div");
-    answersDiv.classList.add("answers");
-
-    for (const answer of answers) {
-      const label = getAnswerElement(answer);
-      answersDiv.appendChild(label);
-    }
-
-    return answersDiv;
-  }
-}
-
-function getTitleElement(text) {
-  const title = document.createElement("h3");
-  title.innerText = text;
-  return title;
-}
-
-function formatId(text) {
-  return text.replaceAll(" ", "-").replaceAll('"', "'").toLowerCase();
-}
-
-function getAnswerElement(text) {
-  const label = document.createElement("label");
-  label.innerText = text;
-  const input = document.createElement("input");
-  const id = formatId(text);
-  input.id = id;
-  label.htmlFor = id;
-  input.setAttribute("type", "radio");
-  input.setAttribute("name", "answer");
-  input.setAttribute("value", text);
-  label.appendChild(input);
-  return label;
-}
-
-function getSubmitButton() {
-  const submitButton = document.createElement("button");
-  submitButton.innerText = "Valider";
-  return submitButton;
-}
-
-function showFeedback(isCorrect, correct, answer) {
-  const correctAnswerId = formatId(correct);
-  const correctElement = document.querySelector(
-    `label[for="${correctAnswerId}"]`,
-  );
-
-  const selectedAnswerId = formatId(answer);
-  const selectedElement = document.querySelector(
-    `label[for="${selectedAnswerId}"]`,
-  );
-
-  correctElement.classList.add("correct");
-  selectedElement.classList.add(isCorrect ? "correct" : "incorrect");
-}
-
-function getFeedbackMessage(isCorrect, correct) {
-  const paragraph = document.createElement("p");
-  paragraph.innerText = isCorrect
-    ? "Bravo ! C'est la bonne réponse"
-    : `Mauvaise réponse...la bonne réponse était ${correct}`;
-
-  return paragraph;
-}
-
-function getProgressBar(max, value) {
-  const progress = document.createElement("progress");
-  progress.setAttribute("max", max);
-  progress.setAttribute("value", value);
-  return progress;
-}
-
-function displayNextQuestionButton(callback) {
-  let remainingTimeout = TIMEOUT;
-
-  app.querySelector("button").remove();
-
-  const getButtonText = () => `Suivant (${remainingTimeout / 1000}s)`;
-
-  const nextButton = document.createElement("button");
-  nextButton.innerText = getButtonText();
-  app.appendChild(nextButton);
-
-  const interval = setInterval(() => {
-    remainingTimeout -= 1000;
-    nextButton.innerText = getButtonText();
-  }, 1000);
-
-  const timeout = setTimeout(() => {
-    handleNextQuestion();
-  }, TIMEOUT);
-
-  const handleNextQuestion = () => {
-    clearInterval(interval);
-    clearTimeout(timeout);
-    callback();
-  };
-
-  nextButton.addEventListener("click", () => {
-    handleNextQuestion();
+    </section>
+  </main>${footer()}`;
+  app.querySelectorAll("[data-topic]").forEach((button) => {
+    button.addEventListener("click", () => showRegistration(button.dataset.topic));
   });
 }
 
-function disableAllAnswers() {
-  const radioInputs = document.querySelectorAll('input[type="radio"]');
+function focusHeading() {
+  window.scrollTo(0, 0);
+  app.querySelector("h1")?.focus({ preventScroll: true });
+}
 
-  for (const radio of radioInputs) {
-    radio.disabled = true;
+function showRegistration(subject) {
+  resetRun();
+  const [title, count, description] = IDENTITIES[subject];
+  app.innerHTML = `${navigation()}<main class="shell start-layout" id="contenu">
+    <div><a class="back-link" href="/#quiz">← Tous les quiz</a>
+      <h1 tabindex="-1">Quiz ${title}</h1>
+      <p class="accent">${count} questions · 30 s par question</p><p class="description">${description}</p>
+    </div>
+    <form class="registration" id="registration-form">
+      <h2>Avant de commencer</h2>
+      <label for="firstname">Prénom</label><input id="firstname" name="firstname" autocomplete="given-name" maxlength="100" placeholder="Ton prénom" required>
+      <label for="email">Adresse e-mail</label><input id="email" name="email" type="email" autocomplete="email" maxlength="255" placeholder="nom@exemple.fr" required>
+      <div class="hp-field" aria-hidden="true"><label for="website">Site web</label><input id="website" name="website" tabindex="-1" autocomplete="off"></div>
+      <button class="button" type="submit">Commencer le quiz</button>
+      <p class="form-hint">Ton e-mail sert à recevoir ton résultat.</p>
+      <p class="form-message" id="registration-message" role="alert"></p>
+    </form>
+  </main>`;
+  app.querySelectorAll('a[href="/#quiz"]').forEach((link) => {
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      showHome();
+      if (location.hash !== "#quiz") location.hash = "quiz";
+      document.querySelector("#quiz").scrollIntoView();
+    });
+  });
+  focusHeading();
+  const form = app.querySelector("form");
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(form));
+    const button = form.querySelector("button");
+    const status = form.querySelector("#registration-message");
+    button.disabled = true;
+    button.textContent = "Chargement…";
+    status.textContent = "";
+
+    try {
+      const { Questions } = await questionModules[`./questions_${subject}.js`]();
+      const response = await fetch("/api/users", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ firstname: data.firstname.trim(), email: data.email.trim(), website: data.website }),
+      });
+      if (!response.ok) throw new Error(response.status === 429 ? "Trop de tentatives. Réessaie dans quelques minutes." : "Impossible de s’inscrire. Réessaie.");
+      const user = await response.json();
+      if (!form.isConnected) return;
+      const questions = [...Questions];
+      for (let index = questions.length - 1; index > 0; index--) {
+        const swap = Math.floor(Math.random() * (index + 1));
+        [questions[index], questions[swap]] = [questions[swap], questions[index]];
+      }
+      currentRun = { user, title, questions, index: 0, score: 0, answers: [] };
+      showQuestion();
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = "Commencer le quiz";
+      status.textContent = error.message || "Impossible de démarrer le quiz.";
+    }
+  });
+}
+
+function showQuestion() {
+  clearInterval(tick);
+  const run = currentRun;
+  const question = run.questions[run.index];
+  const questionNumber = run.index + 1;
+  const total = run.questions.length;
+  const started = Date.now();
+
+  app.innerHTML = `${navigation(true)}<main class="quiz-main shell" id="contenu">
+    <form class="quiz-panel" id="question-form">
+      <div class="split-line"><strong>Quiz ${run.title}</strong><span id="timer">30 s</span></div>
+      <progress aria-label="Progression du quiz" value="${questionNumber}" max="${total}"></progress>
+      <p class="question-caption">Question ${questionNumber} sur ${total}</p>
+      <h1 id="question-title" tabindex="-1">${escape(question.question)}</h1>
+      <fieldset class="options" aria-labelledby="question-title">
+        ${question.answers.map((answer, index) => `<label class="option" data-answer="${index}">
+          <input type="radio" name="choice" value="${index}">
+          <span class="option-key">${String.fromCharCode(65 + index)}</span><span>${escape(answerLabel(answer))}</span><strong class="option-status"></strong>
+        </label>`).join("")}
+      </fieldset>
+      <p class="feedback" role="status" hidden></p>
+      <div class="quiz-actions"><button class="button button-lime" id="validate" type="submit" disabled>Valider ma réponse</button></div>
+    </form>
+  </main>`;
+  focusHeading();
+
+  document.querySelector("#leave-quiz").addEventListener("click", () => {
+    if (window.confirm("Quitter ce quiz ? Les réponses de cette partie ne seront pas enregistrées.")) {
+      showHome();
+      focusHeading();
+    }
+  });
+
+  const form = app.querySelector("form");
+  const submit = form.querySelector("#validate");
+  const feedback = form.querySelector(".feedback");
+  const timer = form.querySelector("#timer");
+  let graded = false;
+  form.addEventListener("change", () => { if (!graded) submit.disabled = false; });
+
+  function grade(option) {
+    if (graded || currentRun !== run) return;
+    graded = true;
+    clearInterval(tick);
+    const answer = option === null ? null : question.answers[option];
+    const correct = answer === question.correct;
+    if (correct) run.score++;
+    run.answers.push({
+      questionIndex: run.index, questionText: question.question, userAnswer: answer,
+      correctAnswer: question.correct, isCorrect: correct, timeSpentMs: Date.now() - started,
+    });
+
+    form.querySelectorAll("[data-answer]").forEach((row) => {
+      const index = Number(row.dataset.answer);
+      row.querySelector("input").disabled = true;
+      if (question.answers[index] === question.correct) {
+        row.classList.add("correct");
+        row.querySelector(".option-status").textContent = "Correct";
+      } else if (index === option) {
+        row.classList.add("incorrect");
+        row.querySelector(".option-status").textContent = "À revoir";
+      }
+    });
+    feedback.hidden = false;
+    feedback.classList.toggle("feedback-missed", !correct);
+    feedback.textContent = correct ? `Bonne réponse. ${answerLabel(question.correct)}` :
+      `${answer === null ? "Temps écoulé." : "À revoir."} Bonne réponse : ${answerLabel(question.correct)}`;
+    submit.disabled = false;
+    submit.textContent = questionNumber === total ? "Voir mon résultat" : "Question suivante";
+    submit.focus();
+  }
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (currentRun !== run) return;
+    if (graded) {
+      run.index++;
+      if (run.index < total) showQuestion();
+      else showResult(run);
+      return;
+    }
+    const selected = new FormData(form).get("choice");
+    if (selected !== null) grade(Number(selected));
+  });
+
+  tick = setInterval(() => {
+    const seconds = Math.max(0, Math.ceil((secondsPerQuestion * 1000 - (Date.now() - started)) / 1000));
+    timer.textContent = `${seconds} s`;
+    if (seconds === 0) grade(null);
+  }, 200);
+}
+
+async function showResult(run) {
+  clearInterval(tick);
+  const total = run.questions.length;
+  app.innerHTML = `${navigation()}<main class="shell results" id="contenu">
+    <h1 tabindex="-1">Quiz terminé.</h1><p class="result-subtitle">${run.title} · ${total} questions</p>
+    <div class="result-layout">
+      <section class="score-panel">
+        <h2>Ton score</h2><p class="score">${run.score}/${total}</p><p>${total - run.score} réponse(s) à revoir</p>
+        <button id="new-quiz" class="button button-lime">Choisir un autre quiz</button>
+        <p id="save-status" role="status">Enregistrement du résultat…</p>
+      </section>
+      <section class="corrections"><h2>Tes corrections</h2><ul>${run.answers.map((answer) => `
+        <li><strong>${escape(answer.questionText)}</strong><span>${answer.isCorrect ? "Bonne réponse" : "À revoir"} · ${escape(answerLabel(answer.correctAnswer))}</span></li>`).join("")}</ul></section>
+    </div>
+  </main>`;
+  focusHeading();
+  document.querySelector("#new-quiz").addEventListener("click", () => {
+    showHome();
+    focusHeading();
+  });
+  const status = document.querySelector("#save-status");
+
+  try {
+    const response = await fetch("/api/results", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: run.user.id, submissionToken: run.user.submissionToken, score: run.score, totalQuestions: total, answers: run.answers }),
+    });
+    if (!response.ok) throw new Error("Create result failed");
+    const { emailAccepted } = await response.json();
+    status.textContent = emailAccepted ? "Résultat enregistré. L’envoi de l’e-mail a été accepté." :
+      "Résultat enregistré. L’envoi de l’e-mail n’a pas été confirmé.";
+  } catch {
+    status.textContent = "Impossible de confirmer l’enregistrement de ton résultat.";
   }
 }
+
+function showNotFound() {
+  app.innerHTML = `${navigation()}<main class="shell" id="contenu"><section class="not-found">
+    <p class="accent">Erreur 404</p><h1>Page introuvable.</h1>
+    <p>Cette page a peut-être été déplacée. Retrouve les thèmes disponibles dans le catalogue.</p>
+    <a class="button" href="/#quiz">Retour aux quiz</a></section></main>`;
+}
+
+if (window.location.pathname === "/") showHome();
+else showNotFound();

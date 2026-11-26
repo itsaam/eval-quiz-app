@@ -2,17 +2,21 @@ import express from "express";
 import cors from "cors";
 import pg from "pg";
 import jwt from "jsonwebtoken";
-import { Resend } from "resend";
 import rateLimit from "express-rate-limit";
 
 const app = express();
 const PORT = process.env.PORT || 3007;
 
 // Trust proxy (Nginx) pour que express-rate-limit identifie correctement les IPs
-app.set("trust proxy", 2);
+app.set("trust proxy", 1);
 
 app.use(cors());
 app.use(express.json());
+
+// Health probes should not consume the API rate limit.
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
 
 // Rate limiting - general (100 requests per 15 min)
 const generalLimiter = rateLimit({
@@ -52,16 +56,22 @@ const pool = new pg.Pool({
   connectionTimeoutMillis: 2000,
 });
 
-const resend = new Resend(process.env.RESEND_API_KEY);
-
 // Admin config
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
 const JWT_SECRET = process.env.JWT_SECRET || "change-this-secret";
-const FROM_EMAIL =
-  process.env.FROM_EMAIL || "Quiz App <noreply@notifications.labformation.fr>";
+const { CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_EMAIL_API_TOKEN, FROM_EMAIL, RESULT_EMAIL_RECIPIENT } = process.env;
 
-// Auth middleware for admin routes
+if (process.env.NODE_ENV === "production" && (!process.env.ADMIN_PASSWORD || !process.env.JWT_SECRET)) {
+  throw new Error("Set ADMIN_PASSWORD and JWT_SECRET before starting the production server.");
+}
+
+function csvText(value) {
+  const text = String(value ?? "");
+  const safe = /^\s*[=+@-]/.test(text) ? "'" + text : text;
+  return '"' + safe.replaceAll('"', '""') + '"';
+}
+
 function authenticateAdmin(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -113,9 +123,9 @@ app.get("/api/admin/results", authenticateAdmin, async (req, res) => {
         u.email,
         MAX(u.firstname) as firstname,
         COUNT(*) as attempts,
-        MAX(qr.score) as best_score,
-        MAX(qr.total_questions) as total_questions,
-        ROUND(AVG(qr.score)::numeric, 1) as avg_score,
+        (ARRAY_AGG(qr.score ORDER BY qr.score::numeric / NULLIF(qr.total_questions, 0) DESC NULLS LAST, qr.completed_at DESC, qr.id DESC))[1] as best_score,
+        (ARRAY_AGG(qr.total_questions ORDER BY qr.score::numeric / NULLIF(qr.total_questions, 0) DESC NULLS LAST, qr.completed_at DESC, qr.id DESC))[1] as total_questions,
+        ROUND(AVG(qr.score::numeric / NULLIF(qr.total_questions, 0)) * 100, 1) as avg_percentage,
         MAX(qr.completed_at) as last_attempt
       FROM quiz_results qr
       JOIN users u ON qr.user_id = u.id
@@ -148,10 +158,10 @@ app.get("/api/admin/results/export", authenticateAdmin, async (req, res) => {
         u.email,
         MAX(u.firstname) as firstname,
         COUNT(*) as attempts,
-        MAX(qr.score) as best_score,
-        MAX(qr.total_questions) as total_questions,
-        ROUND(AVG(qr.score)::numeric, 1) as avg_score,
-        ROUND((MAX(qr.score)::numeric / MAX(qr.total_questions)) * 100, 1) as best_percentage,
+        (ARRAY_AGG(qr.score ORDER BY qr.score::numeric / NULLIF(qr.total_questions, 0) DESC NULLS LAST, qr.completed_at DESC, qr.id DESC))[1] as best_score,
+        (ARRAY_AGG(qr.total_questions ORDER BY qr.score::numeric / NULLIF(qr.total_questions, 0) DESC NULLS LAST, qr.completed_at DESC, qr.id DESC))[1] as total_questions,
+        ROUND(AVG(qr.score::numeric / NULLIF(qr.total_questions, 0)) * 100, 1) as avg_percentage,
+        ROUND(MAX(qr.score::numeric / NULLIF(qr.total_questions, 0)) * 100, 1) as best_percentage,
         MAX(qr.completed_at) as last_attempt
       FROM quiz_results qr
       JOIN users u ON qr.user_id = u.id
@@ -160,10 +170,10 @@ app.get("/api/admin/results/export", authenticateAdmin, async (req, res) => {
     );
 
     const csv = [
-      "Prénom,Email,Tentatives,Meilleur Score,Total Questions,Score Moyen,Meilleur %,Dernière Tentative",
+      "Prénom,Email,Tentatives,Meilleur Score,Total Questions,Moyenne %,Meilleur %,Dernière Tentative",
       ...results.rows.map(
         (r) =>
-          `"${r.firstname}","${r.email}",${r.attempts},${r.best_score},${r.total_questions},${r.avg_score},${r.best_percentage}%,"${r.last_attempt}"`
+          `${csvText(r.firstname)},${csvText(r.email)},${r.attempts},${r.best_score},${r.total_questions},${r.avg_percentage}%,${r.best_percentage}%,${csvText(r.last_attempt)}`
       ),
     ].join("\n");
 
@@ -275,7 +285,8 @@ app.post("/api/users", registrationLimiter, async (req, res) => {
       return res.status(201).json({ id: 0, firstname, email });
     }
 
-    if (!firstname || !email) {
+    if (typeof firstname !== "string" || !firstname.trim() || firstname.length > 100 ||
+        typeof email !== "string" || email.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res
         .status(400)
         .json({ error: "Firstname and email are required" });
@@ -283,10 +294,15 @@ app.post("/api/users", registrationLimiter, async (req, res) => {
 
     const result = await pool.query(
       "INSERT INTO users (firstname, email) VALUES ($1, $2) RETURNING id, firstname, email",
-      [firstname, email]
+      [firstname.trim(), email]
     );
 
-    res.status(201).json(result.rows[0]);
+    const user = result.rows[0];
+    const submissionToken = jwt.sign({ quizUserId: user.id }, JWT_SECRET, {
+      audience: "stacklab-quiz",
+      expiresIn: "2h",
+    });
+    res.status(201).json({ ...user, submissionToken });
   } catch (error) {
     console.error("Error creating user:", error);
     res.status(500).json({ error: "Internal server error" });
@@ -295,23 +311,55 @@ app.post("/api/users", registrationLimiter, async (req, res) => {
 
 // Save quiz results and send email (with rate limiting)
 app.post("/api/results", resultsLimiter, async (req, res) => {
-  const client = await pool.connect();
+  const { userId, score, totalQuestions, answers, submissionToken } = req.body;
+  if (!Number.isInteger(userId) || userId < 1 ||
+      !Number.isInteger(totalQuestions) || totalQuestions < 1 || totalQuestions > 50 ||
+      !Number.isInteger(score) || score < 0 || score > totalQuestions ||
+      !Array.isArray(answers) || answers.length !== totalQuestions ||
+      !answers.every((answer, index) => answer && answer.questionIndex === index &&
+        typeof answer.questionText === "string" && typeof answer.correctAnswer === "string" &&
+        (answer.userAnswer === null || typeof answer.userAnswer === "string") &&
+        answer.isCorrect === (answer.userAnswer === answer.correctAnswer) &&
+        Number.isInteger(answer.timeSpentMs) && answer.timeSpentMs >= 0) ||
+      score !== answers.filter((answer) => answer.isCorrect).length) {
+    return res.status(400).json({ error: "Invalid quiz result" });
+  }
 
   try {
-    const { userId, score, totalQuestions, answers } = req.body;
-
-    if (!userId || score === undefined || !totalQuestions || !answers) {
-      return res.status(400).json({ error: "Missing required fields" });
+    const claim = jwt.verify(submissionToken, JWT_SECRET, { audience: "stacklab-quiz" });
+    if (claim.quizUserId !== userId) {
+      return res.status(403).json({ error: "Invalid submission token" });
     }
+  } catch {
+    return res.status(403).json({ error: "Invalid submission token" });
+  }
 
+  let client;
+  let quizResultId;
+  let user;
+
+  try {
+    client = await pool.connect();
     await client.query("BEGIN");
+
+    const registered = await client.query("SELECT email FROM users WHERE id = $1 FOR UPDATE", [userId]);
+    user = registered.rows[0];
+    if (!user) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ error: "Unknown registration" });
+    }
+    const previous = await client.query("SELECT 1 FROM quiz_results WHERE user_id = $1", [userId]);
+    if (previous.rowCount) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ error: "Result already saved" });
+    }
 
     // Insert quiz result
     const resultQuery = await client.query(
       "INSERT INTO quiz_results (user_id, score, total_questions) VALUES ($1, $2, $3) RETURNING id",
       [userId, score, totalQuestions]
     );
-    const quizResultId = resultQuery.rows[0].id;
+    quizResultId = resultQuery.rows[0].id;
 
     // Insert each answer
     for (const answer of answers) {
@@ -322,7 +370,7 @@ app.post("/api/results", resultsLimiter, async (req, res) => {
           quizResultId,
           answer.questionIndex,
           answer.questionText,
-          answer.userAnswer,
+          answer.userAnswer ?? "",
           answer.correctAnswer,
           answer.isCorrect,
           answer.timeSpentMs,
@@ -331,112 +379,56 @@ app.post("/api/results", resultsLimiter, async (req, res) => {
     }
 
     await client.query("COMMIT");
-
-    // Get user info for email
-    const userQuery = await pool.query(
-      "SELECT firstname, email FROM users WHERE id = $1",
-      [userId]
-    );
-    const user = userQuery.rows[0];
-
-    // Send email with results
-    await sendResultEmail(user, score, totalQuestions, answers);
-
-    res.status(201).json({
-      message: "Results saved and email sent",
-      quizResultId,
-    });
   } catch (error) {
-    await client.query("ROLLBACK");
+    await client?.query("ROLLBACK").catch(() => {});
     console.error("Error saving results:", error);
-    res.status(500).json({ error: "Internal server error" });
+    return res.status(500).json({ error: "Internal server error" });
   } finally {
-    client.release();
+    client?.release();
   }
+
+  let emailAccepted = false;
+  try {
+    emailAccepted = await sendResultEmail(user, score, totalQuestions);
+  } catch (error) {
+    console.error("Cloudflare email request failed", error.name);
+  }
+  res.status(201).json({ message: "Results saved", quizResultId, emailAccepted });
 });
 
-async function sendResultEmail(user, score, totalQuestions, answers) {
+async function sendResultEmail(user, score, totalQuestions) {
+  if (!CLOUDFLARE_ACCOUNT_ID || !CLOUDFLARE_EMAIL_API_TOKEN || !FROM_EMAIL ||
+      (RESULT_EMAIL_RECIPIENT && user.email.toLowerCase() !== RESULT_EMAIL_RECIPIENT.toLowerCase())) {
+    return false;
+  }
+
   const percentage = Math.round((score / totalQuestions) * 100);
 
-  const answersHtml = answers
-    .map(
-      (a, i) => `
-      <tr style="background-color: ${a.isCorrect ? "#d4edda" : "#f8d7da"}">
-        <td style="padding: 8px; border: 1px solid #ddd;">${i + 1}</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${a.questionText}</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${a.userAnswer}</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${
-          a.correctAnswer
-        }</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${
-          a.isCorrect ? "Correct" : "Incorrect"
-        }</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${(
-          a.timeSpentMs / 1000
-        ).toFixed(1)}s</td>
-      </tr>
-    `
-    )
-    .join("");
-
-  const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto;">
-      <h1 style="color: #1d63ed;">Résultats du Quiz App</h1>
-      <p>Bonjour ${user.firstname},</p>
-      <p>Voici vos résultats au quiz :</p>
-
-      <div style="background-color: #e5f2fc; padding: 20px; border-radius: 8px; margin: 20px 0;">
-        <h2 style="margin: 0; color: #1d63ed;">Score : ${score}/${totalQuestions} (${percentage}%)</h2>
-      </div>
-
-      <h3>Détail des réponses :</h3>
-      <table style="width: 100%; border-collapse: collapse;">
-        <thead>
-          <tr style="background-color: #1d63ed; color: white;">
-            <th style="padding: 8px; border: 1px solid #ddd;">#</th>
-            <th style="padding: 8px; border: 1px solid #ddd;">Question</th>
-            <th style="padding: 8px; border: 1px solid #ddd;">Votre réponse</th>
-            <th style="padding: 8px; border: 1px solid #ddd;">Bonne réponse</th>
-            <th style="padding: 8px; border: 1px solid #ddd;">Résultat</th>
-            <th style="padding: 8px; border: 1px solid #ddd;">Temps</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${answersHtml}
-        </tbody>
-      </table>
-
-      <p style="margin-top: 20px; color: #666;">
-        Merci d'avoir participé au quiz !
-      </p>
-    </div>
-  `;
-
-  try {
-    const result = await resend.emails.send({
-      from: FROM_EMAIL,
-      to: user.email,
-      subject: `Résultats Quiz App - ${score}/${totalQuestions}`,
-      html,
-    });
-
-    if (result.error) {
-      console.error(`Failed to send email to ${user.email}:`, result.error);
-    } else {
-      console.log(
-        `Email sent successfully to ${user.email}, id:`,
-        result.data?.id
-      );
+  const account = encodeURIComponent(CLOUDFLARE_ACCOUNT_ID);
+  const response = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${account}/email/sending/send`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${CLOUDFLARE_EMAIL_API_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: FROM_EMAIL,
+        to: user.email,
+        subject: `Résultats Stacklab - ${score}/${totalQuestions}`,
+        text: `Ton score est de ${score}/${totalQuestions} (${percentage} %).`,
+      }),
+      signal: AbortSignal.timeout(8000),
     }
-  } catch (error) {
-    console.error(`Failed to send email to ${user.email}:`, error);
+  );
+  const { success, result } = await response.json();
+  if (response.ok && success && (result?.queued?.length || result?.delivered?.length)) {
+    return true;
   }
+  console.error("Cloudflare did not accept the result email", response.status);
+  return false;
 }
-
-// Health check
-app.get("/health", (req, res) => {
-  res.json({ status: "ok" });
-});
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
