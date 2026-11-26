@@ -25,18 +25,16 @@ function answerLabel(value) {
   return value.replace(/^[A-Z]\.\s+/, "");
 }
 
-function navigation(playing = false) {
+function header(playing = false) {
   return `<header class="site-header shell">
     <a class="wordmark" href="/" aria-label="Stacklab, accueil">stacklab.</a>
-    ${playing ? '<button class="link-button" id="leave-quiz">Quitter le quiz</button>' : `
-      <nav class="main-nav" aria-label="Navigation principale"><a href="/">Accueil</a><a href="/#quiz">Les quiz</a></nav>
-      <a class="admin-link" href="/gestion-quiz">Administration</a>`}
+    ${playing ? '<button class="link-button" id="leave-quiz">Quitter le quiz</button>' : '<a class="admin-link" href="/gestion-quiz">Administration</a>'}
   </header>`;
 }
 
 function footer() {
   return `<footer class="site-footer shell"><a class="wordmark" href="/">stacklab.</a>
-    <a href="/#quiz">Les quiz</a><a href="/gestion-quiz">Administration</a></footer>`;
+    <a href="/gestion-quiz">Administration</a></footer>`;
 }
 
 function resetRun() {
@@ -46,24 +44,13 @@ function resetRun() {
 
 function showHome() {
   resetRun();
-  app.innerHTML = `${navigation()}<main class="shell" id="contenu">
+  app.innerHTML = `${header()}<main class="shell" id="contenu">
     <section class="hero" aria-labelledby="hero-title">
-      <div class="hero-copy">
-        <h1 id="hero-title">DevOps.<br>À toi de jouer.</h1>
-        <p>Six quiz pour réviser Docker, Ansible,<br class="desktop-break"> la CI/CD et les fondamentaux du DevOps.</p>
-        <a class="button" href="#quiz">Explorer les quiz</a>
-      </div>
-      <div class="hero-art">
-        <img src="/stacklab/modules.png" width="641" height="484" alt="Modules électroniques translucides violets empilés">
-        <aside class="quiz-preview" aria-label="Aperçu d’une question">
-          <div class="split-line"><strong>Docker</strong><span>Question 3 / 20</span></div>
-          <p>Construire une image Docker ?</p>
-          <div class="preview-answer"><strong>docker build</strong><span>Bonne réponse</span></div>
-        </aside>
-      </div>
+      <h1 id="hero-title">DevOps. À toi de jouer.</h1>
+      <p>Six quiz pour réviser Docker, Ansible, la CI/CD et les fondamentaux du DevOps.</p>
     </section>
     <section class="catalog" id="quiz" aria-labelledby="catalog-title">
-      <h2 id="catalog-title">Choisis ton quiz</h2>
+      <h2 id="catalog-title" tabindex="-1">Choisis ton quiz</h2>
       <div class="catalog-layout">
         <article class="featured"><h3>Docker</h3><p class="accent">20 questions · 30 s par question</p>
           <p>${IDENTITIES.docker[2]}</p><button class="button" data-topic="docker">Choisir Docker</button></article>
@@ -85,7 +72,7 @@ function focusHeading() {
 function showRegistration(subject) {
   resetRun();
   const [title, count, description] = IDENTITIES[subject];
-  app.innerHTML = `${navigation()}<main class="shell start-layout" id="contenu">
+  app.innerHTML = `${header()}<main class="shell start-layout" id="contenu">
     <div><a class="back-link" href="/#quiz">← Tous les quiz</a>
       <h1 tabindex="-1">Quiz ${title}</h1>
       <p class="accent">${count} questions · 30 s par question</p><p class="description">${description}</p>
@@ -100,13 +87,11 @@ function showRegistration(subject) {
       <p class="form-message" id="registration-message" role="alert"></p>
     </form>
   </main>`;
-  app.querySelectorAll('a[href="/#quiz"]').forEach((link) => {
-    link.addEventListener("click", (event) => {
-      event.preventDefault();
-      showHome();
-      if (location.hash !== "#quiz") location.hash = "quiz";
-      document.querySelector("#quiz").scrollIntoView();
-    });
+  app.querySelector(".back-link").addEventListener("click", (event) => {
+    event.preventDefault();
+    showHome();
+    if (location.hash !== "#quiz") location.hash = "quiz";
+    document.querySelector("#catalog-title").focus();
   });
   focusHeading();
   const form = app.querySelector("form");
@@ -151,7 +136,7 @@ function showQuestion() {
   const total = run.questions.length;
   const started = Date.now();
 
-  app.innerHTML = `${navigation(true)}<main class="quiz-main shell" id="contenu">
+  app.innerHTML = `${header(true)}<main class="quiz-main shell" id="contenu">
     <form class="quiz-panel" id="question-form">
       <div class="split-line"><strong>Quiz ${run.title}</strong><span id="timer">30 s</span></div>
       <progress aria-label="Progression du quiz" value="${questionNumber}" max="${total}"></progress>
@@ -238,7 +223,7 @@ function showQuestion() {
 async function showResult(run) {
   clearInterval(tick);
   const total = run.questions.length;
-  app.innerHTML = `${navigation()}<main class="shell results" id="contenu">
+  app.innerHTML = `${header()}<main class="shell results" id="contenu">
     <h1 tabindex="-1">Quiz terminé.</h1><p class="result-subtitle">${run.title} · ${total} questions</p>
     <div class="result-layout">
       <section class="score-panel">
@@ -272,7 +257,7 @@ async function showResult(run) {
 }
 
 function showNotFound() {
-  app.innerHTML = `${navigation()}<main class="shell" id="contenu"><section class="not-found">
+  app.innerHTML = `${header()}<main class="shell" id="contenu"><section class="not-found">
     <p class="accent">Erreur 404</p><h1>Page introuvable.</h1>
     <p>Cette page a peut-être été déplacée. Retrouve les thèmes disponibles dans le catalogue.</p>
     <a class="button" href="/#quiz">Retour aux quiz</a></section></main>`;
